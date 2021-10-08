@@ -29,6 +29,7 @@ struct thread_data {
         const int * __restrict__ AB_bias;
         const int8_t * __restrict__ BC;
         int8_t * AC;
+	const float * scale;
         int start;
         int end;
 };
@@ -212,6 +213,12 @@ int main()
 	//assert(arr3.shape.size() ==1 && arr3.shape[0] == A_dim);
 #endif
 
+
+#if INT8
+	cnpy::NpyArray arr4 = cnpy::npy_load("scale.npy");
+	float * scale = arr4.data<float>();
+#endif 
+
 #if !(INT8)
     cnpy::NpyArray arr4 = cnpy::npy_load("AB_block_off.npy");
     int *AB_off = arr4.data<int>();
@@ -315,7 +322,6 @@ int main()
 
         //printf (" Load at %.5f milliseconds == \n\n", (s_elapsed * 1000));
 
-
   struct thread_data td[1000][THREADS];
   for(int j = 0 ; j < 1000; j ++){
 	for(int i = 0; i < THREADS; i ++)
@@ -326,6 +332,7 @@ int main()
 	        td[j][i].BC = &BCs[0];
 		//td[j][i].BC = &BCs[j * B_dim * C_dim];
 		td[j][i].AC = result; 
+		td[j][i].scale = scale;
 		//td[j][i].AC = &BCs[0]; 
 
 		//td[j][i].AC = j == 999 ? result :& BCs[((j+1)%2) * B_dim * C_dim];
@@ -347,8 +354,10 @@ int main()
     t1 = high_resolution_clock::now();
 
     while(issed < 10 ) {
-
-        mm(&td[0][0]);
+//#pragma omp parallel for
+//      for(int i = 0 ; i < 4;i ++){
+          mm(&td[0][0]);
+ //     }
         issed += 1;
     }
 
@@ -365,8 +374,11 @@ int main()
     std::cout << reps << std::endl;
 
     while(issed < reps ) {
+//#pragma omp parallel for
+//      for(int i = 0 ; i < 4;i ++){
+          mm(&td[0][0]);
+//      }
 
-        mm(&td[0][0]);
         issed += 1;
     }
    t2 = high_resolution_clock::now();

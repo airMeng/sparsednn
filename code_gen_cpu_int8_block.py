@@ -27,13 +27,12 @@ parser.add_argument('--fuse',default=False,action='store_true')
 parser.add_argument('--x86',default=False,action='store_true')
 parser.add_argument('--arm',default=False,action='store_true')
 parser.add_argument('--threads',type = int, default=4)
-parser.add_argument('--avx512',default=False,action='store_true')
-parser.add_argument('--no_relu',default=False,action='store_true')
+parser.add_argument('--relu',default=False,action='store_true')
 parser.add_argument('--no_row_skip',default=False,action='store_true')
 args = parser.parse_args()
 GY = args.Gy
 FUSE_END = args.fuse
-NO_RELU = args.no_relu
+RELU = args.relu
 print(FUSE_END)
 TSB_MULT = args.Tsb
 A_dim = args.A_dim
@@ -42,9 +41,7 @@ C_dim = args.C_dim
 THREADS = args.threads
 AT = args.AT
 C_blocks = args.C_blocks
-AVX512 = False
-if args.avx512:
-    AVX512 = True
+
 input_file = args.infile
 outfile = args.outfile
 outfile_asm = args.outfile_asm
@@ -58,7 +55,7 @@ ARM = args.arm
 NRS = args.no_row_skip
 CT = args.CT
 B_blocks = args.B_blocks
-
+BLOCK = AT
 
 assert not (X86 and ARM)
 if X86:
@@ -68,10 +65,7 @@ elif ARM:
 else:
     assert False
 
-if AVX512:
-    VEC = 16
-else:
-    VEC = 8
+VEC=16
 
 IN_FORMAT = args.in_format
 OUT_FORMAT = args.out_format
@@ -97,8 +91,8 @@ if X86:
         vmovdqu8     IDX3(%r8,%r11,1), %xmmDA;                 
         vbroadcasti32x4  IDX2(%r8,%r11,1),%ymmNUM {%k1};        
         vbroadcasti32x4  IDX4(%r8,%r11,1), %ymmDA {%k1};       
-        vpermt2d    %zmmDA, %zmm27, %zmmNUM;          
-        vpshufb     %zmm28, %zmmNUM, %zmmNUM;         
+        vpermt2d    %zmmDA, %zmm25, %zmmNUM;          
+        vpshufb     %zmm26, %zmmNUM, %zmmNUM;         
         """
 elif ARM:
     LOAD_CACHE = """
@@ -107,12 +101,11 @@ elif ARM:
 
 
 if X86:
-    if AVX512:
 
-        LOAD_WEIGHT_ASM = """vpbroadcastd OFF(%rcx), %zmm31;
-        """
-        MAIN_PROGRAM_ASM="""vpdpbusd %zmmNUM,%zmm31,%zmmTAR;
-        """
+    LOAD_WEIGHT_ASM = """vpbroadcastd OFF(%rcx), %zmmIDX;
+    """
+    MAIN_PROGRAM_ASM="""vpdpbusd %zmmNUM,%zmmIDX,%zmmTAR;
+    """
 
 elif ARM:
     MAIN_PROGRAM ="""
@@ -123,18 +116,23 @@ elif ARM:
 def emit_load_block(index, currloadreg):
 
     return LOAD_CACHE_ASM.replace("IDX1",str(index[0])).replace("IDX2",str(index[1])). \
-        replace("IDX3",str(index[2])).replace("IDX4",str(index[3])).replace("NUM",str(currloadreg)).replace("DA",str(29-currloadreg))
+        replace("IDX3",str(index[2])).replace("IDX4",str(index[3])).replace("NUM",str(currloadreg)).replace("DA",str(17))
 
 def emit_compute_block(Ny_idx,vals,currloadreg, virg=False):
     global off
-    new_block_asm = LOAD_WEIGHT_ASM.replace("OFF",str(off * 4 ))
+    
+    new_block_asm = ""
+    for i in range(BLOCK):
+        new_block_asm += LOAD_WEIGHT_ASM.replace("OFF",str(off * 4 + i * 4)).replace("IDX",str(31-i))
+    
     for i in range(CT):
-        new_block_asm += MAIN_PROGRAM_ASM.replace("TAR",str(Ny_idx +i * AT)).replace("NUM",str(currloadreg - i))
+        for j in range(BLOCK):
+            new_block_asm += MAIN_PROGRAM_ASM.replace("NUM",str(currloadreg - i)).replace("IDX",str(31-j)).replace("TAR",str(i * BLOCK + j))
     global AB_vals
     AB_vals.extend(vals)
     global A_idx
     A_idx.extend([Ny_idx] * 4)
-    off += 1
+    off += BLOCK
     return new_block_asm
 
 
@@ -165,28 +163,23 @@ def generate_from_B(Ny_indices, B_indices,BA,block,NY,BB_offset, GY = None,A_off
         for i in range(NY):
             for j in range(CT):
                 if BB_offset > 0:
-                    asm += "\t\tvmovups " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4)" + (",%zmm" if AVX512 else ",%ymm") + str(i + j * AT) + ";\n"
+                    asm += "\t\tvmovdqu32 " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4) ,%zmm" + str(i + j * AT) + ";\n"
                 else:
                     asm += "\tvpbroadcastd " + str(mapping[A_offset+i] * 4) + "(%rsi), %zmm" + str(i + AT * j) + ";\n"
 
-                    #asm += "\tvpbroadcastd " + "%xmm" + str(i + AT * j) + (", %zmm" if AVX512 else "(%rsi), %ymm") + str(i + AT * j) + ";\n"
     else:
         for i in range(NY):
             for j in range(CT):
                 if BB_offset > 0:
-                    asm += "\t\tvmovups " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4)" + (",%zmm" if AVX512 else ",%ymm") + str(i + j * AT) + ";\n"
+                    asm += "\t\tvmovups " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4), %zmm" + str(i + j * AT) + ";\n"
                 else:
-                    asm += "\tvxorps " + ("%zmm" if AVX512 else "%ymm") + str(i + AT * j) + "," + \
-                       ("%zmm" if AVX512 else "%ymm") + str(i + AT * j) + "," + ("%zmm" if AVX512 else "%ymm") + str(i + AT * j) + ";\n"
+                    asm += "\tvxorps " + "%zmm"  + str(i + AT * j) + ",%zmm" + str(i + AT * j) + ",%zmm" + str(i + AT * j) + ";\n"
 
     done = set()
     loads = ""
     computes = ""
 
-    if AVX512:
-        TOK = 24
-    else:
-        TOK = 13
+    TOK = 24
     currloadreg = TOK
     # pad end of the zipped list
 
@@ -196,19 +189,13 @@ def generate_from_B(Ny_indices, B_indices,BA,block,NY,BB_offset, GY = None,A_off
     counter = 0
     old_B_idx = -1
     for ny_idx, b_idx in zip(Ny_indices[0],B_indices[0]):
-        assert ny_idx == 0 # for now. We are going to handle AT for quantized at a later date if at all.
-        print(ny_idx, b_idx)
-        if(b_idx < ny_idx):
-            pad_len = ((counter - 1) // 4 + 1 ) * 4 - counter
-            padded_Ny_indices.extend([-1] * pad_len)
-            padded_B_indices.extend([-1] * pad_len)
-            padded_Ny_indices.append(ny_idx)
-            padded_B_indices.append(b_idx)
-            counter = 1
-        else:
-            padded_Ny_indices.append(ny_idx)
-            padded_B_indices.append(b_idx)
-            counter += 1
+        #assert ny_idx == 0 # for now. We are going to handle AT for quantized at a later date if at all.
+        if ny_idx != 0 :
+            continue # we are going to just process the first element in each A tile. 
+        #print(ny_idx, b_idx)
+        padded_Ny_indices.append(ny_idx)
+        padded_B_indices.append(b_idx)
+        counter += 1
     pad_len = ((counter - 1) // 4 + 1 ) * 4 - counter
     padded_Ny_indices.extend([-1] * pad_len)
     padded_B_indices.extend([-1] * pad_len)
@@ -246,15 +233,17 @@ def generate_from_B(Ny_indices, B_indices,BA,block,NY,BB_offset, GY = None,A_off
         vbroadcasti32x4  IDX3(%r8,%r11,1),%ymm29 {%k1};               
                     """.replace("IDX3",str(b_indices[3] * C_dim + i * VEC))
                 load_block_asm += """
-        vpermt2d    %zmm29, %zmm27, %zmmNUM;          
-        vpshufb     %zmm28, %zmmNUM, %zmmNUM; 
+        vpermt2d    %zmm29, %zmm25, %zmmNUM;          
+        vpshufb     %zmm26, %zmmNUM, %zmmNUM; 
                 """.replace("NUM",str(currloadreg-i))
                 loads += load_block_asm
             #print(b_indices)
             num_vals = np.where(np.array(b_indices) == -1)[0][0]
             #print(num_vals)
-            values = np.array([BA[b_indices[i],a_idx] for i in range(num_vals)] + [0 for j in range(4-num_vals)]).astype(np.int8)
-            #print(values)
+            values = []
+            for k in range(BLOCK):
+                values.append( np.array([BA[b_indices[i],a_idx + k] for i in range(num_vals)] + [0 for j in range(4-num_vals)]).astype(np.int8))
+            values = np.hstack(values)
             B_idx.extend(b_indices)
             compute_block_asm = emit_compute_block(ny_idx ,  values, currloadreg , virg = ny_idx not in done)
             computes += compute_block_asm
@@ -265,7 +254,11 @@ def generate_from_B(Ny_indices, B_indices,BA,block,NY,BB_offset, GY = None,A_off
                 load_block_asm = emit_load_block([k * C_dim + i * VEC for k in b_indices], currloadreg - i)
                 loads += load_block_asm
 
-            values = BA[b_indices,a_idx]
+            values = []
+            for i in range(BLOCK):
+                values.append(BA[b_indices,a_idx + i])
+            values = np.hstack(values)
+            
             B_idx.extend(b_indices)
             compute_block_asm = emit_compute_block(ny_idx ,  values, currloadreg , virg = ny_idx not in done)
             computes += compute_block_asm
@@ -288,7 +281,7 @@ def generate_from_B(Ny_indices, B_indices,BA,block,NY,BB_offset, GY = None,A_off
 
 
 def get_idx_balanced(block,BA,A_offset,block_NY,B_bounds = [0,B_dim], GY=None):
-
+    #print(block_NY)
     BA = BA[B_bounds[0]:B_bounds[1]]
     Ny_indices = [[] for i in range(GY)]
     B_indices = [[] for i in range(GY)]
@@ -357,24 +350,26 @@ _spmm:
         .cfi_offset 6, -16
         andq      $-32, %rsp                                    #45.1
         subq      $96, %rsp                                     #45.1
+        mov         $0xf0 , %ebx;               
+        kmovb       %ebx, %k1
         movq      (%rdi), %rcx                                  #47.38
         movq      8(%rdi), %rsi                                 #48.46
         movq      16(%rdi), %r8                                 #49.41
         movq      24(%rdi), %rdx                                #50.22
-        movl      36(%rdi), %eax
-        movl      32(%rdi), %edi                                #51.21
-        vxorps    ZERO, ZERO, ZERO                           #59.19
+        movq      32(%rdi), %rbx
+        movl      44(%rdi), %eax
+        movl      40(%rdi), %edi                                #51.21
         decl    %eax
         decl    %edi
         imul     $TSZ, %eax, %r9d
-        mov         $0xf0 , %ebx;               
-        kmovb       %ebx, %k1
-        vpmovzxbd   vpermt2d_control(%rip), % zmm27;
-        vbroadcasti32x4   vpshufb_control(%rip), % zmm28;
+        
+        vpmovzxbd   vpermt2d_control(%rip), % zmm25;
+        vbroadcasti32x4   vpshufb_control(%rip), % zmm26;
+        
 
 
 
-    """.replace("BOUND",str(C_blocks//THREADS)).replace("TSZ",str(TSZ)).replace("ZERO","%zmm30" if AVX512 else "%ymm14")
+    """.replace("BOUND",str(C_blocks//THREADS)).replace("TSZ",str(TSZ))
 
     #assert A_dim % A_blocks == 0
     #assert C_dim % C_blocks == 0
@@ -405,49 +400,38 @@ _spmm:
 
             program += textwrap.indent(ccode,"\t") + "\n"
             asm_program += textwrap.indent(asm,"\t") + "\n"
-            if OUT_FORMAT == "NCHW":
-                if FUSE_END:
-                    if GY > 1:
-                        print("End fusion strategy not valid.")
-                    for i in range(block_NY):
-                        program += BLOCK_END_REDUCTION.replace("OFFSET",str(mapping[A_offset + i] * C_dim)).replace("IDX",str(i)).replace("BIAS",str(A_offset+i))
-                        if not NO_RELU:
-                            for j in range(CT):
-                                asm_program += "\t\tvmaxps %ymm" + str(i + j * AT) + (", %zmm30," if AVX512 else ", %ymm14,") + "%ymm" + str(i + j * AT) + ";\n"
-                        for j in range(CT):
-                            asm_program += "\t\tvmovdqu32 %ymm" + str(i + j * AT) + ", " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4);\n"
-                    asm_program += """
-                    cmpl      $END, %r10d;
-                    jb  ..B1.NUM;
-                    """.replace("NUM",str(bb_offset + block * 2 + 3)).replace("END",str(TSZ // VEC))
-                    program += "\t}"
-                else:
-                    if b_block == B_blocks - 1:
-                        for i in range(block_NY):
-                            for j in range(CT):
-                                asm_program += "\t\tvpmovdb %zmm" + str(i + j * AT) + "," + "%xmm" + str(i + j * AT) + ";\n"
-
-                            asm_program += """
-                            vinserti32x4 $1,%xmm1,%zmm0,%zmm0;
-                            vinserti32x4 $2,%xmm2,%zmm0,%zmm0;
-                            vinserti32x4 $3,%xmm3,%zmm0,%zmm0;
-                            
-                            """
-                            asm_program += "vmovdqu32 %zmm" + str(i) + ", " + str(mapping[A_offset + i] * C_dim ) + "(%rdx,%r11,1);\n"
-                    else:
-                        for i in range(block_NY):
-                            for j in range(CT):
-                                asm_program += "\t\tvmovdqu32 %zmm" + str(i + j * AT) + ", " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4);\n"
-
+               
+            if b_block == B_blocks - 1:
+                for i in range(block_NY):
+                    asm_program += "\t\tvbroadcastss " + str(mapping[A_offset + i] * 4) + "(%rbx), %zmm20;\n"
+                    for j in range(CT):
+                        if RELU:
+                            asm_program += "\t\tvmaxsb %zmm" + str(i + j * AT) + ", %zmm27, %zmm" + str(i + j * AT) + ";\n"
+                        asm_program += "\t\tvcvtdq2ps {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
+                        asm_program += "\t\tvmulps %zmm" + str(i + j * AT) + ",%zmm20, %zmm" + str(i + j * AT) + ";\n"
+                        asm_program += "\t\tvcvtps2udq {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
+                        asm_program += "\t\tvpmovusdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
+                        #asm_program += "\t\tvpmovdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
 
                     asm_program += """
-                    cmpl      $END, %r10d;
-                    jb  ..B1.NUM;
-                    """.replace("NUM",str(bb_offset + block * 2 + 3)).replace("END",str(TSZ // VEC))
+                    vinserti32x4 $1,%xmmONE,%zmmZERO,%zmmZERO;
+                    vinserti32x4 $2,%xmmTWO,%zmmZERO,%zmmZERO;
+                    vinserti32x4 $3,%xmmTHREE,%zmmZERO,%zmmZERO;
+                    """.replace("ZERO",str(i)).replace("ONE",str(i + AT)).replace("TWO",str(i + 2 * AT)).replace("THREE",str(i + 3 * AT))
+                    asm_program += "vmovdqu32 %zmm" + str(i) + ", " + str(mapping[A_offset + i] * C_dim ) + "(%rdx,%r11,1);\n"
             else:
-                program += BLOCK_END_NHWC.replace("A_offset",str(A_offset)).replace("Ny",str(block_NY)).replace("A_BLOCKS",str(A_blocks)).replace(
-                    "C_BLOCKS", str(C_blocks)).replace("A_dim",str(A_dim)).replace("C_dim",str(C_dim)).replace("B_dim",str(B_dim)) + "\n"
-                # program += BLOCK_CONTROL_END
+                for i in range(block_NY):
+                    for j in range(CT):
+                        #print(str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4))
+                        
+                        asm_program += "\t\tvmovdqu32 %zmm" + str(i + j * AT) + ", " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4);\n"
+
+
+            asm_program += """
+            cmpl      $END, %r10d;
+            jb  ..B1.NUM;
+            """.replace("NUM",str(bb_offset + block * 2 + 3)).replace("END",str(TSZ // VEC))
+            
 
     program += END_NONFUSED.replace("AB_sparse_tidy.npy",name)
     open(outfile,"w").write(program.replace("B_dim",str(B_dim)))
@@ -483,9 +467,6 @@ _spmm:
 
 
     """.replace("TSZ",str(TSZ)).replace("CBLOCKS",str(C_blocks)).replace("NUM1",str(B_blocks * A_blocks *2 + 2)).replace("NUM2",str(B_blocks * A_blocks * 2 + 3))
-
-    if AVX512:
-        asm_program = asm_program.replace("ymm","zmm")
 
     open(outfile_asm,"w").write(asm_program)
 

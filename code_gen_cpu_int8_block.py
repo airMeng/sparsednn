@@ -21,9 +21,11 @@ parser.add_argument('--x86',default=False,action='store_true')
 parser.add_argument('--arm',default=False,action='store_true')
 parser.add_argument('--relu',default=False,action='store_true')
 parser.add_argument('--no_row_skip',default=False,action='store_true')
+parser.add_argument('--append_sum', type=int, default=0)
 args = parser.parse_args()
 FUSE_END = args.fuse
 RELU = args.relu
+APPEND_SUM = args.append_sum
 print(FUSE_END)
 A_dim = args.A_dim
 B_dim = args.B_dim
@@ -376,9 +378,20 @@ _spmm:
                             asm_program += "\t\tvmaxsb %zmm" + str(i + j * AT) + ", %zmm27, %zmm" + str(i + j * AT) + ";\n"
                         asm_program += "\t\tvcvtdq2ps {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
                         asm_program += "\t\tvmulps %zmm" + str(i + j * AT) + ",%zmm20, %zmm" + str(i + j * AT) + ";\n"
+                        if APPEND_SUM:
+                            continue
                         asm_program += "\t\tvcvtps2dq {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
                         asm_program += "\t\tvpmovdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
 
+                    if APPEND_SUM:
+                        base = mapping[A_offset + i] * C_dim * 4
+                        for j in range(CT):
+                            idx = i + j * AT
+                            dst_reg = str(base + j * VEC * 4) + "(%rdx,%r11,4)"
+                            asm_program += "\t\t\t\t\t" + "vmovups " + dst_reg + ", " + "%zmm20" + ";\n"
+                            asm_program += "\t\t\t\t\t" + "vaddps %zmm" + str(idx) + ", " + "%zmm20" + ", " + "%zmm" + str(idx) + ";\n"
+                            asm_program += "\t\t\t\t\t" + "vmovdqu32 %zmm" + str(idx) + ", " + dst_reg + ";\n"
+                        continue
                     asm_program += """
                     vinserti32x4 $1,%xmmONE,%zmmZERO,%zmmZERO;
                     vinserti32x4 $2,%xmmTWO,%zmmZERO,%zmmZERO;

@@ -13,6 +13,8 @@ else:
 bias = np.random.normal(size=(M))
 #bias = np.zeros((M))
 AB = 1 + np.abs(np.random.normal(size=(K,M)).astype(np.float32))
+#AB = -1 - np.abs(np.random.normal(size=(K,M)).astype(np.float32))
+#AB = 10 + np.abs(np.random.normal(size=(K,M)).astype(np.float32))
 
 BLOCK = int(sys.argv[5])
 locs = [i for i in range(M* K) if i %BLOCK == 0]
@@ -38,6 +40,9 @@ if int8:
 print("density",np.count_nonzero(AB) / M/ K)
 AC = np.dot(AB,BC) + np.expand_dims(bias,1)
 AC = AC.astype(np.float32) * np.expand_dims(scale,1)
+# saturation
+AC[AC > 127.0] = 127.0
+AC[AC < -128.0] = -128.0
 
 if int8:
     #AC = AC.astype(np.int32)

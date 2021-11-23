@@ -43,6 +43,7 @@ AC = AC.astype(np.float32) * np.expand_dims(scale,1)
 # saturation
 AC[AC > 127.0] = 127.0
 AC[AC < -128.0] = -128.0
+AC = np.rint(AC)
 
 if int8:
     #AC = AC.astype(np.int32)

@@ -89,7 +89,10 @@ if X86:
 
     LOAD_WEIGHT_ASM = """vpbroadcastd OFF(%rcx), %zmmIDX;
     """
-    MAIN_PROGRAM_ASM="""vpdpbusd %zmmNUM,%zmmIDX,%zmmTAR;
+    #MAIN_PROGRAM_ASM="""vpdpbusd %zmmNUM,%zmmIDX,%zmmTAR;
+    #"""
+    # switch registers 
+    MAIN_PROGRAM_ASM="""vpdpbusd %zmmIDX,%zmmNUM,%zmmTAR;
     """
 
 elif ARM:
@@ -381,7 +384,7 @@ _spmm:
                         if APPEND_SUM:
                             continue
                         asm_program += "\t\tvcvtps2dq {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
-                        asm_program += "\t\tvpmovdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
+                        asm_program += "\t\tvpmovsdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
 
                     if APPEND_SUM:
                         base = mapping[A_offset + i] * C_dim * 4

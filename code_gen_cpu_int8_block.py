@@ -382,25 +382,26 @@ _spmm:
                         asm_program += "\t\tvcvtdq2ps {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
                         asm_program += "\t\tvmulps %zmm" + str(i + j * AT) + ",%zmm20, %zmm" + str(i + j * AT) + ";\n"
                         if APPEND_SUM:
-                            continue
-                        asm_program += "\t\tvcvtps2dq {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
-                        asm_program += "\t\tvpmovsdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
+                            pass
+                        else: # output_type = u8s8
+                            asm_program += "\t\tvcvtps2dq {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
+                            asm_program += "\t\tvpmovsdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
 
+                    # copy DST to DDR
                     if APPEND_SUM:
-                        base = mapping[A_offset + i] * C_dim * 4
+                        # block_NY: dst(MxN)'s row.
+                        # A zmm has the 16 elements of result, like dst_fp32[i][0:16]. VEC is the stride. CT is the number of such units.
                         for j in range(CT):
-                            idx = i + j * AT
-                            dst_reg = str(base + j * VEC * 4) + "(%rdx,%r11,4)"
-                            asm_program += "\t\t\t\t\t" + "vmovups " + dst_reg + ", " + "%zmm20" + ";\n"
-                            asm_program += "\t\t\t\t\t" + "vaddps %zmm" + str(idx) + ", " + "%zmm20" + ", " + "%zmm" + str(idx) + ";\n"
-                            asm_program += "\t\t\t\t\t" + "vmovdqu32 %zmm" + str(idx) + ", " + dst_reg + ";\n"
-                        continue
-                    asm_program += """
-                    vinserti32x4 $1,%xmmONE,%zmmZERO,%zmmZERO;
-                    vinserti32x4 $2,%xmmTWO,%zmmZERO,%zmmZERO;
-                    vinserti32x4 $3,%xmmTHREE,%zmmZERO,%zmmZERO;
-                    """.replace("ZERO",str(i)).replace("ONE",str(i + AT)).replace("TWO",str(i + 2 * AT)).replace("THREE",str(i + 3 * AT))
-                    asm_program += "vmovdqu32 %zmm" + str(i) + ", " + str(mapping[A_offset + i] * C_dim ) + "(%rdx,%r11,1);\n"
+                            asm_program += "\t\t\t\t\t" + "vmovups " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4), %zmm20" + ";\n"
+                            asm_program += "\t\t\t\t\t" + "vaddps %zmm" + str(i + j * AT) + ", %zmm20, %zmm" + str(i + j * AT) + ";\n"
+                            asm_program += "\t\t\t\t\t" + "vmovdqu32 %zmm" + str(i + j * AT) + ", " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4);\n"
+                    else:
+                        asm_program += """
+                        vinserti32x4 $1,%xmmONE,%zmmZERO,%zmmZERO;
+                        vinserti32x4 $2,%xmmTWO,%zmmZERO,%zmmZERO;
+                        vinserti32x4 $3,%xmmTHREE,%zmmZERO,%zmmZERO;
+                        """.replace("ZERO",str(i)).replace("ONE",str(i + AT)).replace("TWO",str(i + 2 * AT)).replace("THREE",str(i + 3 * AT))
+                        asm_program += "vmovdqu32 %zmm" + str(i) + ", " + str(mapping[A_offset + i] * C_dim ) + "(%rdx,%r11,1);\n"
             else:
                 for i in range(block_NY):
                     for j in range(CT):

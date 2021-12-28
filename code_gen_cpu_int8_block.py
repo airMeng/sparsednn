@@ -22,10 +22,12 @@ parser.add_argument('--arm',default=False,action='store_true')
 parser.add_argument('--relu',default=False,action='store_true')
 parser.add_argument('--no_row_skip',default=False,action='store_true')
 parser.add_argument('--append_sum', type=int, default=0)
+parser.add_argument('--sub_func', type=int, default=0)
 args = parser.parse_args()
 FUSE_END = args.fuse
 RELU = args.relu
 APPEND_SUM = args.append_sum
+SUB_FUNC = args.sub_func
 print(FUSE_END)
 A_dim = args.A_dim
 B_dim = args.B_dim
@@ -69,6 +71,9 @@ B_idx = []
 AB_block_offs = [0]
 #global off
 off = 0
+sub_funcs = []
+blockproduct_func = ""
+row_scale_funcs = []
 
 if X86:
     LOAD_CACHE_ASM = """
@@ -113,9 +118,22 @@ def emit_compute_block(Ny_idx,vals,currloadreg):
     for i in range(BLOCK):
         new_block_asm += LOAD_WEIGHT_ASM.replace("OFF",str(off * 4 + i * 4)).replace("IDX",str(31-i))
     
+    new_block_asm_1 = ""
     for i in range(CT):
         for j in range(BLOCK):
-            new_block_asm += MAIN_PROGRAM_ASM.replace("NUM",str(currloadreg - i)).replace("IDX",str(31-j)).replace("TAR",str(i * BLOCK + j))
+            new_block_asm_1 += MAIN_PROGRAM_ASM.replace("NUM",str(currloadreg - i)).replace("IDX",str(31-j)).replace("TAR",str(i * BLOCK + j))
+
+    if SUB_FUNC:
+        new_block_asm += "call _blockproduct"
+    else:
+        new_block_asm += new_block_asm_1
+
+    # Init blockproduct function. Only run for the first time
+    global blockproduct_func
+    if SUB_FUNC and blockproduct_func == "":
+        blockproduct_func = "_blockproduct:\n\t" + new_block_asm_1 + "ret\n"
+        sub_funcs.append(blockproduct_func)
+
     global AB_vals
     AB_vals.extend(vals)
     global A_idx
@@ -376,32 +394,47 @@ _spmm:
                 # any post op implementation goes here. The following sequence implements an optional value and then dequantization.
                 for i in range(block_NY):
                     asm_program += "\t\tvbroadcastss " + str(mapping[A_offset + i] * 4) + "(%rbx), %zmm20;\n"
+                    # (1) multiply scale of each row.
+                    row_asm = ""
                     for j in range(CT):
                         if RELU:
-                            asm_program += "\t\tvmaxsb %zmm" + str(i + j * AT) + ", %zmm27, %zmm" + str(i + j * AT) + ";\n"
-                        asm_program += "\t\tvcvtdq2ps {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
-                        asm_program += "\t\tvmulps %zmm" + str(i + j * AT) + ",%zmm20, %zmm" + str(i + j * AT) + ";\n"
+                            row_asm += "\t\tvmaxsb %zmm" + str(i + j * AT) + ", %zmm27, %zmm" + str(i + j * AT) + ";\n"
+                        row_asm += "\t\tvcvtdq2ps {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
+                        row_asm += "\t\tvmulps %zmm" + str(i + j * AT) + ",%zmm20, %zmm" + str(i + j * AT) + ";\n"
                         if APPEND_SUM:
                             pass
                         else: # output_type = u8s8
-                            asm_program += "\t\tvcvtps2dq {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
-                            asm_program += "\t\tvpmovsdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
+                            row_asm += "\t\tvcvtps2dq {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
+                            row_asm += "\t\tvpmovsdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
 
-                    # copy DST to DDR
+                    # (2) copy DST to DDR
+                    copy_out_asm = ""
                     if APPEND_SUM:
                         # block_NY: dst(MxN)'s row.
                         # A zmm has the 16 elements of result, like dst_fp32[i][0:16]. VEC is the stride. CT is the number of such units.
                         for j in range(CT):
-                            asm_program += "\t\t\t\t\t" + "vmovups " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4), %zmm20" + ";\n"
-                            asm_program += "\t\t\t\t\t" + "vaddps %zmm" + str(i + j * AT) + ", %zmm20, %zmm" + str(i + j * AT) + ";\n"
-                            asm_program += "\t\t\t\t\t" + "vmovdqu32 %zmm" + str(i + j * AT) + ", " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4);\n"
+                            copy_out_asm += "\t\t\t\t\t" + "vmovups " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4), %zmm20" + ";\n"
+                            copy_out_asm += "\t\t\t\t\t" + "vaddps %zmm" + str(i + j * AT) + ", %zmm20, %zmm" + str(i + j * AT) + ";\n"
+                            copy_out_asm += "\t\t\t\t\t" + "vmovdqu32 %zmm" + str(i + j * AT) + ", " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4);\n"
                     else:
-                        asm_program += """
+                        row_asm += """
                         vinserti32x4 $1,%xmmONE,%zmmZERO,%zmmZERO;
                         vinserti32x4 $2,%xmmTWO,%zmmZERO,%zmmZERO;
                         vinserti32x4 $3,%xmmTHREE,%zmmZERO,%zmmZERO;
                         """.replace("ZERO",str(i)).replace("ONE",str(i + AT)).replace("TWO",str(i + 2 * AT)).replace("THREE",str(i + 3 * AT))
-                        asm_program += "vmovdqu32 %zmm" + str(i) + ", " + str(mapping[A_offset + i] * C_dim ) + "(%rdx,%r11,1);\n"
+                        copy_out_asm += "vmovdqu32 %zmm" + str(i) + ", " + str(mapping[A_offset + i] * C_dim ) + "(%rdx,%r11,1);\n"
+
+                    if SUB_FUNC:
+                        asm_program += "\t\tcall _row_scale_func_" + str(i) + "\n\t\t" + copy_out_asm
+                    else:
+                        asm_program += row_asm + copy_out_asm
+
+                    # Init row_scale function. Only run for the first time
+                    global row_scale_funcs
+                    if SUB_FUNC and len(row_scale_funcs) != block_NY:
+                        temp_i = "_row_scale_func_" + str(i) + ":\n" + row_asm + "ret\n"
+                        row_scale_funcs.append(temp_i)
+                        sub_funcs.append(temp_i)
             else:
                 for i in range(block_NY):
                     for j in range(CT):
@@ -445,7 +478,7 @@ _spmm:
 
     """.replace("TSZ",str(TSZ)).replace("CBLOCKS",str(C_blocks)).replace("NUM1",str(B_blocks * A_blocks *2 + 2)).replace("NUM2",str(B_blocks * A_blocks * 2 + 3))
 
-    open(outfile_asm,"w").write(asm_program)
+    open(outfile_asm,"w").write("\n".join(sub_funcs) + asm_program)
 
 
 

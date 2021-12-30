@@ -165,11 +165,15 @@ def generate_from_B(Ny_indices, B_indices,BA,block,NY,BB_offset,A_offset=None):
     #print(A_offset)
     if input_file_bias is not None:
         for i in range(NY):
+            loaded_bias = "%zmm" + str(i + AT * 0)
             for j in range(CT):
                 if BB_offset > 0:
                     asm += "\t\tvmovdqu32 " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4) ,%zmm" + str(i + j * AT) + ";\n"
                 else:
-                    asm += "\tvpbroadcastd " + str(mapping[A_offset+i] * 4) + "(%rsi), %zmm" + str(i + AT * j) + ";\n"
+                    if j == 0:
+                        asm += "\tvpbroadcastd " + str(mapping[A_offset+i] * 4) + "(%rsi), %zmm" + str(i + AT * j) + ";\n"
+                    else:
+                        asm += "\tvmovapd " + loaded_bias + ", %zmm" + str(i + AT * j) + ";\n"
 
     else:
         for i in range(NY):

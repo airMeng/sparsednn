@@ -400,6 +400,7 @@ _spmm:
                     asm_program += "\t\tvbroadcastss " + str(mapping[A_offset + i] * 4) + "(%rbx), %zmm20;\n"
                     # (1) multiply scale of each row.
                     row_asm = ""
+                    copy_out_asm = ""
                     for j in range(CT):
                         if RELU:
                             row_asm += "\t\tvmaxsb %zmm" + str(i + j * AT) + ", %zmm27, %zmm" + str(i + j * AT) + ";\n"
@@ -409,24 +410,24 @@ _spmm:
                             pass
                         else: # output_type = u8s8
                             row_asm += "\t\tvcvtps2dq {rn-sae}, %zmm" + str(i + j * AT) + ",%zmm" + str(i + j * AT) + ";\n"
-                            row_asm += "\t\tvpmovsdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
+                            # row_asm += "\t\tvpmovsdb %zmm" + str(i + j * AT) + ",%xmm" + str(i + j * AT) + ";\n"
+                            copy_out_asm += "\t\tvpmovsdb %zmm" + str(i + j * AT) + ", " + str(mapping[A_offset + i] * C_dim + j * VEC) + "(%rdx,%r11,1);\n"
 
                     # (2) copy DST to DDR
-                    copy_out_asm = ""
-                    if APPEND_SUM:
-                        # block_NY: dst(MxN)'s row.
-                        # A zmm has the 16 elements of result, like dst_fp32[i][0:16]. VEC is the stride. CT is the number of such units.
-                        for j in range(CT):
+                    # block_NY: dst(MxN)'s row.
+                    # A zmm has the 16 elements of result, like dst_fp32[i][0:16]. VEC is the stride. CT is the number of such units.
+                    for j in range(CT):
+                        if APPEND_SUM:
                             copy_out_asm += "\t\t\t\t\t" + "vmovups " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4), %zmm20" + ";\n"
                             copy_out_asm += "\t\t\t\t\t" + "vaddps %zmm" + str(i + j * AT) + ", %zmm20, %zmm" + str(i + j * AT) + ";\n"
                             copy_out_asm += "\t\t\t\t\t" + "vmovdqu32 %zmm" + str(i + j * AT) + ", " + str(mapping[A_offset + i] * C_dim * 4 + j * VEC * 4) + "(%rdx,%r11,4);\n"
-                    else:
-                        row_asm += """
-                        vinserti32x4 $1,%xmmONE,%zmmZERO,%zmmZERO;
-                        vinserti32x4 $2,%xmmTWO,%zmmZERO,%zmmZERO;
-                        vinserti32x4 $3,%xmmTHREE,%zmmZERO,%zmmZERO;
-                        """.replace("ZERO",str(i)).replace("ONE",str(i + AT)).replace("TWO",str(i + 2 * AT)).replace("THREE",str(i + 3 * AT))
-                        copy_out_asm += "vmovdqu32 %zmm" + str(i) + ", " + str(mapping[A_offset + i] * C_dim ) + "(%rdx,%r11,1);\n"
+                        continue # Skiped. The following code block only support moving out 64 columns of DST_S8 at one time, other column number will cause precision errors.
+                        # row_asm += """
+                        # vinserti32x4 $1,%xmmONE,%zmmZERO,%zmmZERO;
+                        # vinserti32x4 $2,%xmmTWO,%zmmZERO,%zmmZERO;
+                        # vinserti32x4 $3,%xmmTHREE,%zmmZERO,%zmmZERO;
+                        # """.replace("ZERO",str(i)).replace("ONE",str(i + AT)).replace("TWO",str(i + 2 * AT)).replace("THREE",str(i + 3 * AT))
+                        # copy_out_asm += "vmovdqu32 %zmm" + str(i) + ", " + str(mapping[A_offset + i] * C_dim ) + "(%rdx,%r11,1);\n"
 
                     if SUB_FUNC:
                         asm_program += "\t\tcall _row_scale_func_" + str(i) + "\n\t\t" + copy_out_asm
@@ -436,7 +437,7 @@ _spmm:
                     # Init row_scale function. Only run for the first time
                     global row_scale_funcs
                     if SUB_FUNC and len(row_scale_funcs) != block_NY:
-                        temp_i = "_row_scale_func_" + str(i) + ":\n" + row_asm + "ret\n"
+                        temp_i = "_row_scale_func_" + str(i) + ":\n" + row_asm + "\t\t\t\tret\n"
                         row_scale_funcs.append(temp_i)
                         sub_funcs.append(temp_i)
             else:

@@ -23,11 +23,13 @@ parser.add_argument('--relu',default=False,action='store_true')
 parser.add_argument('--no_row_skip',default=False,action='store_true')
 parser.add_argument('--append_sum', type=int, default=0)
 parser.add_argument('--sub_func', type=int, default=0)
+parser.add_argument('--AB_vals_npy', type=str, default="AB_vals.npy")
 args = parser.parse_args()
 FUSE_END = args.fuse
 RELU = args.relu
 APPEND_SUM = args.append_sum
 SUB_FUNC = args.sub_func
+AB_vals_npy = args.AB_vals_npy
 print(FUSE_END)
 A_dim = args.A_dim
 B_dim = args.B_dim
@@ -511,7 +513,7 @@ else:
 
 print("Reduced A dimension " + str(A_dim))
 gencode(BA,C_dim,A_blocks,C_blocks,name=input_file)
-np.save("AB_vals.npy",np.array(AB_vals))
+np.save(AB_vals_npy,np.array(AB_vals))
 np.save("AB_block_off.npy",np.array(AB_block_offs).astype(np.int32))
 np.save("A_idx.npy",np.array(A_idx).astype(np.int32))
 np.save("B_idx.npy",np.array(B_idx).astype(np.int32))
